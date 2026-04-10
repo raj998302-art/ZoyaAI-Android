@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+  <title>Zoya AI</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0a0a0f;
+      color: #fff;
+      font-family: 'Segoe UI', sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      text-align: center;
+      padding: 20px;
+    }
+    .orb {
+      width: 120px; height: 120px;
+      border-radius: 50%;
+      background: radial-gradient(circle at 35% 35%, #a78bfa, #6d28d9 60%, #1e1b4b);
+      box-shadow: 0 0 40px #7c3aed88, 0 0 80px #4c1d9544;
+      margin-bottom: 32px;
+      animation: pulse 2.5s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); box-shadow: 0 0 40px #7c3aed88; }
+      50% { transform: scale(1.08); box-shadow: 0 0 70px #7c3aedcc; }
+    }
+    h1 { font-size: 2.2rem; font-weight: 700; color: #a78bfa; margin-bottom: 8px; }
+    p { color: #8b8fa8; font-size: 1rem; margin-bottom: 40px; }
+    .status {
+      background: #1a1a2e;
+      border: 1px solid #2d2d44;
+      border-radius: 16px;
+      padding: 20px 32px;
+      color: #f59e0b;
+      font-size: 0.95rem;
+    }
+    .status span { display: block; margin-top: 8px; color: #6b7280; font-size: 0.85rem; }
+  </style>
+</head>
+<body>
+  <div class="orb"></div>
+  <h1>Zoya AI</h1>
+  <p>Your intelligent AI assistant</p>
+  <div class="status">
+    ⚠️ Connecting to Zoya servers...
+    <span>If this persists, check your internet connection.</span>
+  </div>
+  <script>
+    // Try to redirect to live URL after 2s
+    setTimeout(() => {
+      window.location.href = "https://ais-dev-kj5b6yrv73utzbjhek6rqd-75073874065.asia-east1.run.app";
+    }, 2000);
+  </script>
+</body>
+</html>
