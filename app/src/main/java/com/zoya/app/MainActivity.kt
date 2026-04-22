@@ -2,27 +2,44 @@ package com.zoya.app
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.WallpaperManager
 import android.bluetooth.BluetoothAdapter
+import android.content.BroadcastReceiver
+import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.graphics.BitmapFactory
 import android.hardware.camera2.CameraAccessException
 import android.hardware.camera2.CameraManager
+import android.media.AudioManager
 import android.net.Uri
 import android.net.wifi.WifiManager
+import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.provider.AlarmClock
 import android.provider.Settings
 import android.webkit.*
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import java.io.File
 import java.io.FileOutputStream
 
 class MainActivity : AppCompatActivity() {
+
+    companion object {
+        const val EXTRA_WAKE_LAUNCH = "wake_launch"
+        const val EXTRA_REMINDER_MESSAGE = "reminder_message"
+        const val EXTRA_REMINDER_TYPE = "reminder_type"
+    }
 
     private lateinit var webView: WebView
 
@@ -56,6 +73,13 @@ class MainActivity : AppCompatActivity() {
             add(Manifest.permission.BLUETOOTH_SCAN)
         }
     }.toTypedArray()
+
+    private val wakeReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val transcript = intent.getStringExtra(WakeWordService.EXTRA_TRANSCRIPT).orEmpty()
+            notifyWebView("onWakeWord", transcript)
+        }
+    }
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -126,284 +150,71 @@ class MainActivity : AppCompatActivity() {
                     webView.loadUrl("file:///android_asset/index.html")
                 }
             }
+
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                // Deliver any pending wake / reminder intent extras to the page.
+                handleIncomingIntent(intent)
+            }
         }
 
-        // Register all JS bridge interfaces
-        webView.addJavascriptInterface(ZoyaInterface(this), "Android")
+        // Register JS bridge
+        webView.addJavascriptInterface(ZoyaInterface(this) { script ->
+            runOnUiThread { webView.evaluateJavascript(script, null) }
+        }, "Android")
+
+        // Kick off background services
+        val prefs = getSharedPreferences("zoya_prefs", MODE_PRIVATE)
+        if (prefs.getBoolean("wake_enabled", true)) {
+            try { WakeWordService.start(this) } catch (_: Exception) {}
+        }
+        IdleNotificationWorker.schedule(this)
 
         // Load the app
         webView.loadUrl("https://ais-dev-kj5b6yrv73utzbjhek6rqd-75073874065.asia-east1.run.app")
     }
 
+    override fun onResume() {
+        super.onResume()
+        LocalBroadcastManager.getInstance(this).registerReceiver(
+            wakeReceiver, IntentFilter(WakeWordService.ACTION_WAKE_DETECTED)
+        )
+    }
+
+    override fun onPause() {
+        super.onPause()
+        try {
+            LocalBroadcastManager.getInstance(this).unregisterReceiver(wakeReceiver)
+        } catch (_: Exception) {}
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleIncomingIntent(intent)
+    }
+
+    private fun handleIncomingIntent(intent: Intent?) {
+        if (intent == null) return
+        if (intent.getBooleanExtra(EXTRA_WAKE_LAUNCH, false)) {
+            val transcript = intent.getStringExtra(WakeWordService.EXTRA_TRANSCRIPT).orEmpty()
+            notifyWebView("onWakeWord", transcript)
+        }
+        val reminderMsg = intent.getStringExtra(EXTRA_REMINDER_MESSAGE)
+        if (!reminderMsg.isNullOrBlank()) {
+            val type = intent.getStringExtra(EXTRA_REMINDER_TYPE) ?: "reminder"
+            notifyWebView("onReminder", "$type|$reminderMsg")
+        }
+    }
+
+    private fun notifyWebView(event: String, data: String) {
+        val safe = data.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n")
+        val js = "window.ZoyaNative && window.ZoyaNative.$event && " +
+                 "window.ZoyaNative.$event('$safe');"
+        runOnUiThread { webView.evaluateJavascript(js, null) }
+    }
+
     override fun onBackPressed() {
         if (webView.canGoBack()) webView.goBack()
         else super.onBackPressed()
-    }
-}
-
-// ══════════════════════════════════════════════════════════════════
-//   ZoyaInterface — All JavaScript Bridges (call via window.Android)
-// ══════════════════════════════════════════════════════════════════
-class ZoyaInterface(private val ctx: AppCompatActivity) {
-
-    // ── Open any installed app by name ─────────────────────────
-    @JavascriptInterface
-    fun openApp(appName: String) {
-        val pm = ctx.packageManager
-        val apps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
-        for (app in apps) {
-            if (pm.getApplicationLabel(app).toString().lowercase().contains(appName.lowercase())) {
-                val intent = pm.getLaunchIntentForPackage(app.packageName)
-                if (intent != null) {
-                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    ctx.startActivity(intent)
-                    return
-                }
-            }
-        }
-        toast("App not found: $appName")
-    }
-
-    // ── Open URL in browser ─────────────────────────────────────
-    @JavascriptInterface
-    fun openUrl(url: String) {
-        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        ctx.startActivity(intent)
-    }
-
-    // ── Google Search ───────────────────────────────────────────
-    @JavascriptInterface
-    fun searchGoogle(query: String) {
-        openUrl("https://www.google.com/search?q=${Uri.encode(query)}")
-    }
-
-    // ── YouTube ─────────────────────────────────────────────────
-    @JavascriptInterface
-    fun playYoutube(query: String) {
-        val appIntent = Intent(Intent.ACTION_SEARCH).apply {
-            setPackage("com.google.android.youtube")
-            putExtra("query", query)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-        try {
-            ctx.startActivity(appIntent)
-        } catch (e: Exception) {
-            openUrl("https://www.youtube.com/results?search_query=${Uri.encode(query)}")
-        }
-    }
-
-    // ── Torch ON ────────────────────────────────────────────────
-    @JavascriptInterface
-    fun torchOn() {
-        try {
-            val cm = ctx.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-            cm.setTorchMode(cm.cameraIdList[0], true)
-            toast("🔦 Torch ON")
-        } catch (e: CameraAccessException) { toast("Torch error") }
-    }
-
-    // ── Torch OFF ───────────────────────────────────────────────
-    @JavascriptInterface
-    fun torchOff() {
-        try {
-            val cm = ctx.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-            cm.setTorchMode(cm.cameraIdList[0], false)
-            toast("Torch OFF")
-        } catch (e: CameraAccessException) { toast("Torch error") }
-    }
-
-    // ── Wi-Fi ON ────────────────────────────────────────────────
-    @JavascriptInterface
-    fun wifiOn() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            ctx.startActivity(Intent(Settings.Panel.ACTION_WIFI).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            })
-        } else {
-            @Suppress("DEPRECATION")
-            (ctx.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager)
-                .isWifiEnabled = true
-            toast("📶 Wi-Fi ON")
-        }
-    }
-
-    // ── Wi-Fi OFF ───────────────────────────────────────────────
-    @JavascriptInterface
-    fun wifiOff() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            ctx.startActivity(Intent(Settings.Panel.ACTION_WIFI).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            })
-        } else {
-            @Suppress("DEPRECATION")
-            (ctx.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager)
-                .isWifiEnabled = false
-            toast("Wi-Fi OFF")
-        }
-    }
-
-    // ── Wi-Fi status ────────────────────────────────────────────
-    @JavascriptInterface
-    fun isWifiEnabled(): Boolean =
-        (ctx.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager).isWifiEnabled
-
-    // ── Bluetooth ON ────────────────────────────────────────────
-    @JavascriptInterface
-    fun bluetoothOn() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            ctx.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            })
-        } else {
-            @Suppress("DEPRECATION", "MissingPermission")
-            BluetoothAdapter.getDefaultAdapter()?.enable()
-            toast("🔵 Bluetooth ON")
-        }
-    }
-
-    // ── Bluetooth OFF ───────────────────────────────────────────
-    @JavascriptInterface
-    fun bluetoothOff() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            ctx.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            })
-        } else {
-            @Suppress("DEPRECATION", "MissingPermission")
-            BluetoothAdapter.getDefaultAdapter()?.disable()
-            toast("Bluetooth OFF")
-        }
-    }
-
-    // ── Make phone call ─────────────────────────────────────────
-    @JavascriptInterface
-    fun makeCall(number: String) {
-        val perm = Manifest.permission.CALL_PHONE
-        val action = if (ContextCompat.checkSelfPermission(ctx, perm) == PackageManager.PERMISSION_GRANTED)
-            Intent.ACTION_CALL else Intent.ACTION_DIAL
-        ctx.startActivity(Intent(action, Uri.parse("tel:$number")).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        })
-    }
-
-    // ── Send SMS ────────────────────────────────────────────────
-    @JavascriptInterface
-    fun sendSms(number: String, body: String) {
-        ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("sms:$number")).apply {
-            putExtra("sms_body", body)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        })
-    }
-
-    // ── Create file in Downloads ────────────────────────────────
-    @JavascriptInterface
-    fun createFile(name: String, content: String): String {
-        return try {
-            val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-            dir.mkdirs()
-            FileOutputStream(File(dir, name)).use { it.write(content.toByteArray()) }
-            toast("✅ Saved: $name")
-            "ok"
-        } catch (e: Exception) { "error:${e.message}" }
-    }
-
-    // ── Open Google Maps ────────────────────────────────────────
-    @JavascriptInterface
-    fun openMaps(query: String) {
-        try {
-            ctx.startActivity(Intent(Intent.ACTION_VIEW,
-                Uri.parse("geo:0,0?q=${Uri.encode(query)}")).apply {
-                setPackage("com.google.android.apps.maps")
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            })
-        } catch (e: Exception) {
-            openUrl("https://maps.google.com/?q=${Uri.encode(query)}")
-        }
-    }
-
-    // ── Set brightness ──────────────────────────────────────────
-    @JavascriptInterface
-    fun setBrightness(value: Int) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && Settings.System.canWrite(ctx)) {
-            Settings.System.putInt(ctx.contentResolver,
-                Settings.System.SCREEN_BRIGHTNESS, value.coerceIn(0, 255))
-            toast("☀️ Brightness: $value")
-        }
-    }
-
-    // ── Share text ──────────────────────────────────────────────
-    @JavascriptInterface
-    fun shareText(text: String) {
-        ctx.startActivity(Intent.createChooser(
-            Intent(Intent.ACTION_SEND).apply {
-                type = "text/plain"
-                putExtra(Intent.EXTRA_TEXT, text)
-            }, "Share"
-        ).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) })
-    }
-
-    // ── Vibrate ─────────────────────────────────────────────────
-    @JavascriptInterface
-    fun vibrate() {
-        val v = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            (ctx.getSystemService(android.os.VibratorManager::class.java)).defaultVibrator
-        } else {
-            @Suppress("DEPRECATION")
-            ctx.getSystemService(Context.VIBRATOR_SERVICE) as android.os.Vibrator
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            v.vibrate(android.os.VibrationEffect.createOneShot(300,
-                android.os.VibrationEffect.DEFAULT_AMPLITUDE))
-        } else {
-            @Suppress("DEPRECATION")
-            v.vibrate(300)
-        }
-    }
-
-    // ── Device info ─────────────────────────────────────────────
-    @JavascriptInterface
-    fun getDeviceInfo(): String =
-        """{"brand":"${Build.BRAND}","model":"${Build.MODEL}","android":"${Build.VERSION.RELEASE}","sdk":${Build.VERSION.SDK_INT}}"""
-
-    // ── Open camera ─────────────────────────────────────────────
-    @JavascriptInterface
-    fun openCamera() {
-        ctx.startActivity(Intent(android.provider.MediaStore.ACTION_IMAGE_CAPTURE).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        })
-    }
-
-    // ── Open gallery ────────────────────────────────────────────
-    @JavascriptInterface
-    fun openGallery() {
-        ctx.startActivity(Intent(Intent.ACTION_VIEW).apply {
-            type = "image/*"
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        })
-    }
-
-    // ── Open Settings ───────────────────────────────────────────
-    @JavascriptInterface
-    fun openSettings() {
-        ctx.startActivity(Intent(Settings.ACTION_SETTINGS).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        })
-    }
-
-    // ── Get installed apps list ─────────────────────────────────
-    @JavascriptInterface
-    fun getInstalledApps(): String {
-        val pm = ctx.packageManager
-        val list = pm.getInstalledApplications(PackageManager.GET_META_DATA)
-            .map { "\"${pm.getApplicationLabel(it)}\"" }
-            .sorted().joinToString(",")
-        return "[$list]"
-    }
-
-    // ── Show Toast ──────────────────────────────────────────────
-    @JavascriptInterface
-    fun toast(msg: String) = ctx.runOnUiThread {
-        Toast.makeText(ctx, msg, Toast.LENGTH_SHORT).show()
     }
 }
