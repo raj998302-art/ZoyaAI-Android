@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Zoya AI Browser Controller",
+  "version": "1.0",
+  "description": "Allows Zoya AI to control the browser, type, click, and automate tasks like a real human.",
+  "permissions": [
+    "tabs",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["zoya-bridge.js"]
+    }
+  ]
+}

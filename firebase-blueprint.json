@@ -1,0 +1,89 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile and preferences",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID"
+        },
+        "email": {
+          "type": "string",
+          "format": "email"
+        },
+        "displayName": {
+          "type": "string"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "preferences": {
+          "type": "object",
+          "description": "User specific preferences like theme, voice, etc."
+        }
+      },
+      "required": ["uid", "createdAt"]
+    },
+    "Message": {
+      "title": "Message",
+      "description": "A single message in the chat history",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "sender": {
+          "type": "string",
+          "enum": ["user", "zoya"]
+        },
+        "text": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "number",
+          "description": "Timestamp of the message"
+        },
+        "userId": {
+          "type": "string",
+          "description": "The ID of the user who owns this message"
+        }
+      },
+      "required": ["id", "sender", "text", "timestamp", "userId"]
+    },
+    "LearnedFact": {
+      "title": "Learned Fact",
+      "description": "Facts learned by Zoya for a specific user",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string"
+        },
+        "fact": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "number",
+          "description": "Timestamp the fact was learned"
+        }
+      },
+      "required": ["userId", "fact", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "Stores user profiles and preferences"
+    },
+    "/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/Message" },
+      "description": "Stores all chat messages, filtered by userId"
+    },
+    "/learned_facts/{factId}": {
+      "schema": { "$ref": "#/entities/LearnedFact" },
+      "description": "Stores learned facts, filtered by userId"
+    }
+  }
+}

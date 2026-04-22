@@ -1,0 +1,134 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Document ID: {userId}
+    // Fields:
+    //   - uid: string (required, immutable)
+    //   - email: string (optional)
+    //   - displayName: string (optional)
+    //   - createdAt: string (required, immutable)
+    //   - preferences: map (optional)
+    //
+    // Collection: messages
+    // Document ID: {messageId}
+    // Fields:
+    //   - id: string (required, immutable)
+    //   - sender: string (required, enum: ['user', 'zoya'])
+    //   - text: string (required)
+    //   - timestamp: number (required, immutable)
+    //   - userId: string (required, immutable)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    function isDocOwner() {
+      return isAuthenticated() && request.auth.uid == resource.data.userId;
+    }
+    
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+    
+    function uidUnchanged() {
+      return !('uid' in request.resource.data) || request.resource.data.uid == request.auth.uid;
+    }
+    
+    function uidNotModified() {
+      return !('uid' in request.resource.data) || request.resource.data.uid == resource.data.uid;
+    }
+
+    function userIdUnchanged() {
+      return !('userId' in request.resource.data) || request.resource.data.userId == request.auth.uid;
+    }
+    
+    function userIdNotModified() {
+      return !('userId' in request.resource.data) || request.resource.data.userId == resource.data.userId;
+    }
+
+    function isValidString(val, minLen, maxLen) {
+      return val is string && val.size() >= minLen && val.size() <= maxLen;
+    }
+
+    function isValidOptionalString(field, minLen, maxLen) {
+      return !(field in request.resource.data) || isValidString(request.resource.data[field], minLen, maxLen);
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+    
+    function isValidUser() {
+      let data = request.resource.data;
+      return hasRequiredFields(['uid', 'createdAt']) &&
+             data.uid == request.auth.uid &&
+             data.createdAt is string &&
+             isValidOptionalString('email', 3, 100) &&
+             isValidOptionalString('displayName', 1, 100) &&
+             (!('preferences' in data) || data.preferences is map);
+    }
+
+    function isValidMessage() {
+      let data = request.resource.data;
+      return hasRequiredFields(['id', 'sender', 'text', 'timestamp', 'userId']) &&
+             isValidString(data.id, 1, 100) &&
+             data.sender in ['user', 'zoya'] &&
+             isValidString(data.text, 1, 10000) &&
+             data.timestamp is number &&
+             data.userId == request.auth.uid;
+    }
+
+    function isValidLearnedFact() {
+      let data = request.resource.data;
+      return hasRequiredFields(['userId', 'fact', 'timestamp']) &&
+             data.userId == request.auth.uid &&
+             isValidString(data.fact, 1, 5000) &&
+             data.timestamp is number;
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidUser() && uidUnchanged();
+      allow update: if isOwner(userId) && isValidUser() && uidNotModified() && 
+                    request.resource.data.createdAt == resource.data.createdAt;
+      allow delete: if isOwner(userId);
+    }
+
+    match /messages/{messageId} {
+      allow read: if isDocOwner();
+      allow create: if isAuthenticated() && isValidMessage() && userIdUnchanged();
+      allow update: if isDocOwner() && isValidMessage() && userIdNotModified() &&
+                    request.resource.data.id == resource.data.id &&
+                    request.resource.data.timestamp == resource.data.timestamp;
+      allow delete: if isDocOwner();
+    }
+
+    match /learned_facts/{factId} {
+      allow read: if isDocOwner();
+      allow create: if isAuthenticated() && isValidLearnedFact() && userIdUnchanged();
+      allow update: if isDocOwner() && isValidLearnedFact() && userIdNotModified() &&
+                    request.resource.data.timestamp == resource.data.timestamp;
+      allow delete: if isDocOwner();
+    }
+  }
+}

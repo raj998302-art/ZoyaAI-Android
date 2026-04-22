@@ -1,0 +1,21 @@
+{
+  "name": "Zoya AI Assistant",
+  "short_name": "Zoya",
+  "description": "Your intelligent, sassy, and witty AI companion.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#050505",
+  "theme_color": "#050505",
+  "icons": [
+    {
+      "src": "https://api.dicebear.com/7.x/bottts/svg?seed=Zoya&backgroundColor=transparent",
+      "sizes": "192x192",
+      "type": "image/svg+xml"
+    },
+    {
+      "src": "https://api.dicebear.com/7.x/bottts/svg?seed=Zoya&backgroundColor=transparent",
+      "sizes": "512x512",
+      "type": "image/svg+xml"
+    }
+  ]
+}

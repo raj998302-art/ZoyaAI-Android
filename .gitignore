@@ -1,10 +1,8 @@
-*.iml
-.gradle
-/local.properties
-/.idea
+node_modules/
+build/
+dist/
+coverage/
 .DS_Store
-/build
-/captures
-.externalNativeBuild
-.cxx
-local.properties
+*.log
+.env*
+!.env.example
