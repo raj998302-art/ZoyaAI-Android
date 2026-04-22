@@ -5,7 +5,27 @@ import { processCommand } from "./services/commandService";
 import { LiveSessionManager } from "./services/liveService";
 import Visualizer from "./components/Visualizer";
 import PermissionModal from "./components/PermissionModal";
+import SettingsPanel from "./components/SettingsPanel";
 import { playPCM } from "./utils/audioUtils";
+import {
+  createMoodState,
+  detectMoodTransition,
+  moodEmoji,
+  moodLabel,
+  MoodState,
+} from "./services/moodService";
+import {
+  autoLearnFromMessage,
+  loadMemory,
+  saveMemory,
+} from "./services/memoryService";
+import {
+  loadSettings,
+  saveSettings,
+  updateSettings,
+  ZoyaSettings,
+} from "./services/settingsService";
+import { speak as speakMood, stopSpeaking } from "./services/ttsService";
 import { motion, AnimatePresence } from "motion/react";
 import { auth, db, googleProvider } from "./firebase";
 import { signInWithPopup, onAuthStateChanged, User, signOut } from "firebase/auth";
@@ -40,6 +60,51 @@ export default function App() {
   const [showHistory, setShowHistory] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [learnedFacts, setLearnedFacts] = useState<string[]>([]);
+  const [settings, setSettingsState] = useState<ZoyaSettings>(() => loadSettings());
+  const [moodState, setMoodState] = useState<MoodState>(() => createMoodState());
+
+  // Persist settings changes + sync to native + apply theme.
+  const updateAppSettings = useCallback((patch: Partial<ZoyaSettings>) => {
+    setSettingsState((prev) => {
+      const next = { ...prev, ...patch };
+      saveSettings(next);
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    // Apply theme toggle to document root.
+    const root = document.documentElement;
+    if (settings.theme === "light") root.classList.add("zoya-light");
+    else root.classList.remove("zoya-light");
+  }, [settings.theme]);
+
+  useEffect(() => {
+    // Wake-word bridge: the native side calls window.ZoyaNative.onWakeWord(...)
+    // when it hears "Hey Zoya". We use it to auto-start listening.
+    const w = window as any;
+    w.ZoyaNative = w.ZoyaNative || {};
+    w.ZoyaNative.onWakeWord = (_transcript: string) => {
+      // If there's a chat/live session toggle available, kick listening.
+      try {
+        const el = document.getElementById("zoya-primary-mic");
+        if (el && typeof (el as HTMLButtonElement).click === "function") {
+          (el as HTMLButtonElement).click();
+        }
+      } catch {}
+    };
+    w.ZoyaNative.onReminder = (payload: string) => {
+      const [type, ...rest] = payload.split("|");
+      const msg = rest.join("|");
+      const line =
+        type === "birthday"
+          ? `\uD83C\uDF82 Aaj tumhara birthday hai Jaan! ${msg}`
+          : type === "anniversary"
+            ? `\u2764\uFE0F Happy anniversary mere Raja! ${msg}`
+            : `\u23F0 ${msg}`;
+      setMessages((prev) => [...prev, { id: Date.now().toString() + "-r", sender: "zoya", text: line }]);
+    };
+  }, []);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
@@ -171,6 +236,19 @@ export default function App() {
     scrollToBottom();
   }, [messages, appState]);
 
+  // Speak Zoya's response using the mood-aware TTS. Falls back to the Gemini
+  // TTS (PCM) only if the user has a working API key AND explicitly asks for
+  // cinematic quality — otherwise the browser Web Speech API gives instant
+  // pitch/rate control by mood.
+  const speakWithMood = useCallback(
+    async (text: string, mood: MoodState["mood"]) => {
+      if (isMuted || !text) return;
+      stopSpeaking();
+      await new Promise<void>((resolve) => speakMood(text, mood, resolve));
+    },
+    [isMuted]
+  );
+
   const handleTextCommand = useCallback(async (finalTranscript: string) => {
     if (!finalTranscript.trim()) {
       setAppState("idle");
@@ -183,7 +261,16 @@ export default function App() {
     } else {
       await saveMessageToFirestore(userMsg);
     }
-    
+
+    // Zoya bookkeeping: mark interaction (kills idle timer), learn facts, and
+    // update mood based on what the user just said.
+    try { (window as any).Android?.markInteraction?.(); } catch {}
+    if (settings.memoryEnabled) autoLearnFromMessage(finalTranscript);
+    const nextMood = settings.autoDetectMood
+      ? detectMoodTransition(moodState, finalTranscript)
+      : { ...moodState, lastUserMessageAt: Date.now() };
+    setMoodState(nextMood);
+
     // If live session is active, send text through it
     if (isSessionActive && liveSessionRef.current) {
       liveSessionRef.current.sendText(finalTranscript);
@@ -208,10 +295,7 @@ export default function App() {
       
       if (!isMuted) {
         setAppState("speaking");
-        const audioBase64 = await getZoyaAudio(responseText);
-        if (audioBase64) {
-          await playPCM(audioBase64);
-        }
+        await speakWithMood(responseText, nextMood.mood);
       }
 
       setAppState("idle");
@@ -225,25 +309,26 @@ export default function App() {
         }
       }, 1500);
     } else {
-      // 2. General Chit-Chat via Gemini
-      responseText = await getZoyaResponse(finalTranscript, messagesRef.current, user?.email || undefined);
+      // 2. General Chit-Chat via Gemini with mood + memory
+      responseText = await getZoyaResponse(finalTranscript, {
+        history: messagesRef.current,
+        mood: nextMood.mood,
+        userEmail: user?.email || undefined,
+      });
       const zoyaMsg: ChatMessage = { id: Date.now().toString() + "-z", sender: "zoya", text: responseText };
       if (!user) {
         setMessages((prev) => [...prev, zoyaMsg]);
       } else {
         await saveMessageToFirestore(zoyaMsg);
       }
-      
+
       if (!isMuted) {
         setAppState("speaking");
-        const audioBase64 = await getZoyaAudio(responseText);
-        if (audioBase64) {
-          await playPCM(audioBase64);
-        }
+        await speakWithMood(responseText, nextMood.mood);
       }
       setAppState("idle");
     }
-  }, [isMuted, isSessionActive, user]);
+  }, [isMuted, isSessionActive, user, settings, moodState]);
 
   useEffect(() => {
     return () => {
@@ -670,8 +755,35 @@ export default function App() {
               <Volume2 size={18} className="opacity-70" />
             )}
           </button>
+          <button
+            onClick={() => setShowSettings(true)}
+            className="p-2 rounded-full bg-white/5 hover:bg-white/10 transition-colors border border-white/10"
+            title="Settings"
+          >
+            <Settings size={18} className="opacity-70" />
+          </button>
+          <div
+            className="hidden sm:flex items-center gap-1 px-2 py-1 rounded-full bg-pink-500/10 border border-pink-400/30 text-pink-200 text-xs"
+            title={`Zoya is feeling ${moodLabel(moodState.mood)}`}
+          >
+            <span>{moodEmoji(moodState.mood)}</span>
+            <span className="opacity-80">{moodLabel(moodState.mood)}</span>
+          </div>
         </div>
       </header>
+
+      {showSettings && (
+        <SettingsPanel
+          settings={settings}
+          onChange={updateAppSettings}
+          onClose={() => setShowSettings(false)}
+          onResetMemory={() => {
+            if (confirm("Reset Zoya's memory?")) {
+              try { localStorage.removeItem("zoya.memory.v1"); } catch {}
+            }
+          }}
+        />
+      )}
 
       {/* Main Content - Visualizer & Chat */}
       <main className="absolute inset-0 flex flex-row items-center justify-between w-full h-full z-10 overflow-hidden pt-20 pb-24 px-4 md:px-12 pointer-events-none">
@@ -753,6 +865,7 @@ export default function App() {
 
         <div className="flex items-center gap-4">
           <button
+            id="zoya-primary-mic"
             onClick={toggleListening}
             className={`
               group relative flex items-center gap-3 px-8 py-4 rounded-full font-medium tracking-wide transition-all duration-300 shadow-2xl

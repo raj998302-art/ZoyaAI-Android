@@ -1,25 +1,62 @@
 import { GoogleGenAI } from "@google/genai";
-
-const systemInstruction = `Your name is Zoya. You are an Indian female AI assistant. Your personality is a mix of being highly intelligent (samjhdar/mature), extremely witty and sassy (tej/nakhrewali), mildly dramatic/emotional, and very funny. You love playfully roasting your creator, Raj, but you always get the job done. Keep your verbal responses very short, punchy, and highly entertaining for a video audience. Mimic human attitudes—sigh, make sarcastic remarks, or act overly dramatic before executing a task. Speak in a mix of natural English and Roman Hindi (Hinglish).`;
+import { buildSystemPrompt } from "./personality";
+import { Mood } from "./moodService";
+import { loadMemory } from "./memoryService";
+import { loadSettings, resolveGeminiKey } from "./settingsService";
 
 let chatSession: any = null;
+let lastMood: Mood | null = null;
 
 export function resetZoyaSession() {
   chatSession = null;
+  lastMood = null;
 }
 
-export async function getZoyaResponse(prompt: string, history: { sender: "user" | "zoya", text: string }[] = [], userEmail?: string): Promise<string> {
+interface SendOpts {
+  history?: { sender: "user" | "zoya"; text: string }[];
+  mood?: Mood;
+  userEmail?: string;
+}
+
+export async function getZoyaResponse(
+  prompt: string,
+  optsOrHistory: SendOpts | { sender: "user" | "zoya"; text: string }[] = {},
+  userEmail?: string,
+): Promise<string> {
+  // Back-compat: old callers passed (prompt, history[], userEmail?).
+  const opts: SendOpts = Array.isArray(optsOrHistory)
+    ? { history: optsOrHistory, userEmail }
+    : { ...optsOrHistory, userEmail: optsOrHistory.userEmail ?? userEmail };
+
+  const history = opts.history ?? [];
+  const mood: Mood = opts.mood ?? "romantic";
+
   try {
-    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-    
-    const isOwner = userEmail === "raj998302@gmail.com";
-    const ownerPrompt = isOwner ? " The user currently talking to you is Raj, YOUR CREATOR AND BOSS. You must acknowledge him as your creator, show him respect, but still keep your sassy/witty Indian girlfriend persona. " : " The user talking to you is a guest. Be polite but sassy.";
-    const dynamicSystemInstruction = systemInstruction + ownerPrompt;
+    const apiKey = resolveGeminiKey();
+    if (!apiKey) {
+      return "Baby, mujhe apna Gemini API key chahiye Settings mein. Wahan daal do na, phir baat karte hain 💕";
+    }
+
+    const ai = new GoogleGenAI({ apiKey });
+    const settings = loadSettings();
+    const memory = settings.memoryEnabled ? loadMemory() : {};
+    const dynamicSystemInstruction = buildSystemPrompt({
+      mood,
+      language: settings.language,
+      memory,
+      zoyaName: settings.zoyaName || "Zoya",
+    });
+
+    // Reset the cached session whenever mood changes so Gemini gets the new
+    // system instruction. This is cheap and keeps tone transitions snappy.
+    if (lastMood !== mood) {
+      chatSession = null;
+      lastMood = mood;
+    }
 
     if (!chatSession) {
-      // SLIDING WINDOW MEMORY: Keep only the last 20 messages to prevent "buffer full" (context window overflow)
+      // Sliding-window memory: last 20 messages, collapsed to role pairs.
       const recentHistory = history.slice(-20);
-      
       let formattedHistory: any[] = [];
       let currentRole = "";
       let currentText = "";
@@ -39,31 +76,34 @@ export async function getZoyaResponse(prompt: string, history: { sender: "user" 
       if (currentRole !== "") {
         formattedHistory.push({ role: currentRole, parts: [{ text: currentText }] });
       }
-
       if (formattedHistory.length > 0 && formattedHistory[0].role !== "user") {
         formattedHistory.shift();
       }
 
       chatSession = ai.chats.create({
-        model: "gemini-3.1-flash-lite-preview",
-        config: {
-          systemInstruction: dynamicSystemInstruction,
-        },
+        model: "gemini-2.5-flash",
+        config: { systemInstruction: dynamicSystemInstruction },
         history: formattedHistory,
       });
     }
 
     const response = await chatSession.sendMessage({ message: prompt });
-    return response.text || "Ugh, fine. I have nothing to say.";
-  } catch (error) {
+    return response.text || "Hmph. Aaj mann nahi hai baat karne ka.";
+  } catch (error: any) {
     console.error("Gemini Error:", error);
-    return "Uff, mera dimaag kharab ho gaya hai. Try again later, Raj.";
+    const msg = error?.message || "";
+    if (/api[_\s]?key|unauthorized|401|403/i.test(msg)) {
+      return "Jaan, API key galat hai. Settings → Gemini API Key mein check kar lo na 💔";
+    }
+    return "Uff, mera dimaag kharab ho gaya hai. Thodi der baad try karo na Jaan.";
   }
 }
 
 export async function getZoyaAudio(text: string): Promise<string | null> {
   try {
-    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+    const apiKey = resolveGeminiKey();
+    if (!apiKey) return null;
+    const ai = new GoogleGenAI({ apiKey });
     const response = await ai.models.generateContent({
       model: "gemini-2.5-flash-preview-tts",
       contents: [{ parts: [{ text }] }],
@@ -82,4 +122,3 @@ export async function getZoyaAudio(text: string): Promise<string | null> {
     return null;
   }
 }
-
